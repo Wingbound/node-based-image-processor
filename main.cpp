@@ -373,6 +373,172 @@ public:
     }
 };
 
+// Blur Node
+class BlurNode : public Node {
+    private:
+        int blurRadius = 5;
+        bool directionalBlur = false;
+        float angleInDegrees = 0.0f;
+        bool showKernel = false;
+        std::vector<float> kernelValues;
+        
+        void updateKernelPreview() {
+            kernelValues.clear();
+            if (directionalBlur) {
+                // For directional blur, create a motion blur kernel
+                float angleInRadians = angleInDegrees * M_PI / 180.0f;
+                float dx = cos(angleInRadians);
+                float dy = sin(angleInRadians);
+                
+                int size = 2 * blurRadius + 1;
+                cv::Mat kernel = cv::Mat::zeros(size, size, CV_32F);
+                cv::Point center(blurRadius, blurRadius);
+                
+                // Create a directional kernel
+                for (int i = -blurRadius; i <= blurRadius; ++i) {
+                    int x = center.x + static_cast<int>(dx * i);
+                    int y = center.y + static_cast<int>(dy * i);
+                    
+                    // Ensure we're within bounds
+                    if (x >= 0 && x < size && y >= 0 && y < size) {
+                        kernel.at<float>(y, x) = 1.0f;
+                    }
+                }
+                
+                // Normalize the kernel
+                kernel = kernel / cv::sum(kernel)[0];
+                
+                // Copy to kernelValues for display
+                for (int y = 0; y < size; ++y) {
+                    for (int x = 0; x < size; ++x) {
+                        kernelValues.push_back(kernel.at<float>(y, x));
+                    }
+                }
+            } else {
+                // For uniform Gaussian blur, we don't actually need to create the kernel
+                // as OpenCV's GaussianBlur will do it for us, but we'll create it for visualization
+                int size = 2 * blurRadius + 1;
+                cv::Mat kernel = cv::Mat::zeros(size, size, CV_32F);
+                cv::getGaussianKernel(size, blurRadius, CV_32F).copyTo(kernel);
+                
+                // Make it 2D
+                kernel = kernel * kernel.t();
+                
+                // Copy to kernelValues for display
+                for (int y = 0; y < size; ++y) {
+                    for (int x = 0; x < size; ++x) {
+                        kernelValues.push_back(kernel.at<float>(y, x));
+                    }
+                }
+            }
+        }
+    
+    public:
+        BlurNode(int id) : Node(id, "Blur") {
+            addInputPin();
+            addOutputPin();
+            updateKernelPreview();
+        }
+    
+        void process(const std::map<int, std::shared_ptr<Node>>& nodes, 
+                     const std::vector<Connection>& connections) override {
+            if (!getNeedsProcessing()) return;
+    
+            int outputPinIndex = 0;
+            auto inputNode = getConnectedInputNode(inputPins[0], nodes, connections, outputPinIndex);
+            
+            if (inputNode) {
+                // Make sure the input node is processed
+                if (inputNode->getNeedsProcessing()) {
+                    inputNode->process(nodes, connections);
+                }
+                
+                cv::Mat inputImage = inputNode->getOutputImage(outputPinIndex);
+                if (!inputImage.empty()) {
+                    if (directionalBlur) {
+                        // Create a motion blur kernel
+                        float angleInRadians = angleInDegrees * M_PI / 180.0f;
+                        cv::Size ksize(0, 0);
+                        cv::Point2f dir(cos(angleInRadians), sin(angleInRadians));
+                        cv::Mat kernel = cv::getGaussianKernel(2 * blurRadius + 1, blurRadius, CV_32F);
+                        cv::Mat kernel2D = kernel * kernel.t();
+                        
+                        // Apply the motion blur
+                        cv::filter2D(inputImage, processedImage, -1, kernel2D);
+                    } else {
+                        // Apply standard Gaussian blur
+                        cv::Size ksize(2 * blurRadius + 1, 2 * blurRadius + 1);
+                        cv::GaussianBlur(inputImage, processedImage, ksize, 0);
+                    }
+                    markProcessed();
+                }
+            }
+        }
+    
+        void drawNodeContent() override {
+            // Input pin
+            ImNodes::BeginInputAttribute(inputPins[0]);
+            ImGui::Text("Input");
+            ImNodes::EndInputAttribute();
+    
+            // Node controls
+            bool changed = false;
+            changed |= ImGui::SliderInt("Radius", &blurRadius, 1, 20);
+            changed |= ImGui::Checkbox("Directional Blur", &directionalBlur);
+            
+            if (directionalBlur) {
+                changed |= ImGui::SliderFloat("Angle", &angleInDegrees, 0.0f, 360.0f);
+            }
+            
+            ImGui::Checkbox("Show Kernel", &showKernel);
+            
+            if (changed) {
+                updateKernelPreview();
+                setNeedsProcessing();
+            }
+            
+            // Display kernel preview
+            if (showKernel && !kernelValues.empty()) {
+                ImGui::Text("Kernel Preview:");
+                int size = 2 * blurRadius + 1;
+                float cellSize = std::min(100.0f / size, 20.0f);
+                
+                ImGui::BeginChild("KernelPreview", ImVec2(size * cellSize + 20, size * cellSize + 20), true);
+                ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                
+                ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();
+                ImVec2 canvas_sz = ImVec2(size * cellSize, size * cellSize);
+                ImVec2 canvas_p1 = ImVec2(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
+                
+                // Find max value for normalization
+                float maxVal = 0.0f;
+                for (float val : kernelValues) {
+                    maxVal = std::max(maxVal, val);
+                }
+                
+                // Draw cells
+                for (int y = 0; y < size; ++y) {
+                    for (int x = 0; x < size; ++x) {
+                        float val = kernelValues[y * size + x] / maxVal;
+                        ImVec2 cell_p0 = ImVec2(canvas_p0.x + x * cellSize, canvas_p0.y + y * cellSize);
+                        ImVec2 cell_p1 = ImVec2(cell_p0.x + cellSize, cell_p0.y + cellSize);
+                        
+                        ImU32 color = ImGui::GetColorU32(ImVec4(val, val, val, 1.0f));
+                        draw_list->AddRectFilled(cell_p0, cell_p1, color);
+                        draw_list->AddRect(cell_p0, cell_p1, IM_COL32(50, 50, 50, 255));
+                    }
+                }
+                
+                ImGui::EndChild();
+            }
+    
+            // Output pin
+            ImNodes::BeginOutputAttribute(outputPins[0]);
+            ImGui::Text("Output");
+            ImNodes::EndOutputAttribute();
+        }
+    };
+
 // Node Editor class to manage the canvas
 class NodeEditor {
 private:
@@ -506,6 +672,9 @@ public:
         else if (type == "Output") {
             return std::make_shared<OutputNode>(id);
         }
+        else if (type == "Blur") {
+            return std::make_shared<BlurNode>(id);
+        }
         
         return nullptr;
     }
@@ -568,6 +737,10 @@ int main() {
                 }
                 if (ImGui::MenuItem("Output")) {
                     auto node = editor.createNode("Output");
+                    editor.addNode(node);
+                }
+                if (ImGui::MenuItem("Blur")) {
+                    auto node = editor.createNode("Blur");
                     editor.addNode(node);
                 }
                 ImGui::EndMenu();
