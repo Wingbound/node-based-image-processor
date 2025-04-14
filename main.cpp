@@ -373,6 +373,197 @@ public:
     }
 };
 
+// Color Channel Splitter Node
+class ColorChannelSplitterNode : public Node {
+    private:
+        bool outputGrayscale = false;
+        GLuint channelTextures[4] = {0};  // R, G, B, A
+        std::vector<cv::Mat> splitChannels;
+        
+        // Change in updateTextures method
+void updateTextures(const std::vector<cv::Mat>& channels) {
+    // Clean up previous textures
+    for (int i = 0; i < 4; i++) {
+        if (channelTextures[i]) {
+            glDeleteTextures(1, &channelTextures[i]);
+            channelTextures[i] = 0;
+        }
+    }
+    
+    // Create textures for each channel
+    for (size_t i = 0; i < channels.size(); i++) {
+        if (!channels[i].empty()) {
+            glGenTextures(1, &channelTextures[i]);
+            glBindTexture(GL_TEXTURE_2D, channelTextures[i]);
+            
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            
+            // For grayscale output, use the channel directly
+            // For color output, create a colored version based on the channel
+            cv::Mat displayChannel;
+            if (outputGrayscale) {
+                displayChannel = channels[i].clone();
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, displayChannel.cols, displayChannel.rows, 
+                           0, GL_LUMINANCE, GL_UNSIGNED_BYTE, displayChannel.data);
+            } else {
+                // Create colored version for preview
+                cv::Mat colored;
+                if (i == 0) {  // Red
+                    cv::Mat zeros = cv::Mat::zeros(channels[i].size(), CV_8UC1);
+                    std::vector<cv::Mat> components = {zeros, zeros, channels[i]};
+                    cv::merge(components, colored);
+                } else if (i == 1) {  // Green
+                    cv::Mat zeros = cv::Mat::zeros(channels[i].size(), CV_8UC1);
+                    std::vector<cv::Mat> components = {zeros, channels[i], zeros};
+                    cv::merge(components, colored);
+                } else if (i == 2) {  // Blue
+                    cv::Mat zeros = cv::Mat::zeros(channels[i].size(), CV_8UC1);
+                    std::vector<cv::Mat> components = {channels[i], zeros, zeros};
+                    cv::merge(components, colored);
+                } else {  // Alpha - keep as grayscale
+                    cv::cvtColor(channels[i], colored, cv::COLOR_GRAY2BGR);
+                }
+                
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, colored.cols, colored.rows, 
+                           0, GL_BGR, GL_UNSIGNED_BYTE, colored.data);
+            }
+        }
+    }
+}
+    
+    public:
+        ColorChannelSplitterNode(int id) : Node(id, "Color Channel Splitter") {
+            addInputPin();
+            // Add 4 output pins for R, G, B, A channels
+            for (int i = 0; i < 4; i++) {
+                addOutputPin();
+            }
+            for (int i = 0; i < 4; i++) {
+                splitChannels.push_back(cv::Mat());
+            }
+        }
+        
+        ~ColorChannelSplitterNode() {
+            for (int i = 0; i < 4; i++) {
+                if (channelTextures[i]) {
+                    glDeleteTextures(1, &channelTextures[i]);
+                }
+            }
+        }
+    
+        void process(const std::map<int, std::shared_ptr<Node>>& nodes, 
+                     const std::vector<Connection>& connections) override {
+            if (!getNeedsProcessing()) return;
+    
+            int outputPinIndex = 0;
+            auto inputNode = getConnectedInputNode(inputPins[0], nodes, connections, outputPinIndex);
+            
+            if (inputNode) {
+                // Make sure the input node is processed
+                if (inputNode->getNeedsProcessing()) {
+                    inputNode->process(nodes, connections);
+                }
+                
+                cv::Mat inputImage = inputNode->getOutputImage(outputPinIndex);
+                if (!inputImage.empty()) {
+                    // Split the channels
+                    std::vector<cv::Mat> channels;
+                    cv::split(inputImage, channels);
+
+                    // Store the original channels so we can access them later
+                    splitChannels.clear();
+                    for (size_t i = 0; i < channels.size(); i++) {
+                        splitChannels.push_back(channels[i].clone());
+                    }
+
+                    // Ensure we have 4 channels (R, G, B, A)
+                    while (splitChannels.size() < 4) {
+                        cv::Mat alpha = cv::Mat::ones(inputImage.size(), CV_8UC1) * 255;
+                        splitChannels.push_back(alpha);
+                    }
+                    
+                    // Ensure we have 4 channels (R, G, B, A), even if input doesn't have alpha
+                    while (channels.size() < 4) {
+                        // Create an empty alpha channel if needed
+                        cv::Mat alpha = cv::Mat::ones(inputImage.size(), CV_8UC1) * 255;
+                        channels.push_back(alpha);
+                    }
+
+                    if (outputGrayscale) {
+                        // For grayscale output, keep each channel as is
+                        processedImage = splitChannels[0]; // Store R in processedImage for main output
+                    } else {
+                        // For colored visualization, create the red version for main output
+                        cv::Mat redColored = cv::Mat::zeros(inputImage.size(), CV_8UC3);
+                        cv::Mat blueZero = cv::Mat::zeros(inputImage.size(), CV_8UC1);
+                        cv::Mat greenZero = cv::Mat::zeros(inputImage.size(), CV_8UC1);
+                        std::vector<cv::Mat> redComponents = {blueZero, greenZero, splitChannels[0]};
+                        cv::merge(redComponents, redColored);
+                        processedImage = redColored;
+                    }
+
+                    updateTextures(splitChannels);
+                    
+                    markProcessed();
+                }
+            }
+        }
+    
+        cv::Mat getOutputImage(int pinIndex) const {
+            // Output pin 0 = R, 1 = G, 2 = B, 3 = A
+            if (pinIndex >= 0 && pinIndex < outputPins.size() && pinIndex < splitChannels.size()) {
+                // Return the corresponding channel from our stored split channels
+                return splitChannels[pinIndex];
+            }
+            
+            // If the pin index doesn't match or something went wrong
+            return cv::Mat();
+        }
+    
+        void drawNodeContent() override {
+            // Input pin
+            ImNodes::BeginInputAttribute(inputPins[0]);
+            ImGui::Text("Input");
+            ImNodes::EndInputAttribute();
+    
+            // Node controls
+            bool changed = ImGui::Checkbox("Output as Grayscale", &outputGrayscale);
+            
+            if (changed) {
+                setNeedsProcessing();
+            }
+            
+            // Display channel previews if we have processed image
+            if (!processedImage.empty()) {
+                ImGui::Text("Channel Previews:");
+                
+                const char* channelNames[4] = {"R", "G", "B", "A"};
+                float previewSize = 80.0f;
+                
+                for (int i = 0; i < 4; i++) {
+                    if (channelTextures[i]) {
+                        ImGui::PushID(i);
+                        ImGui::Text("%s", channelNames[i]);
+                        ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<unsigned long long int>(channelTextures[i])), 
+                                    ImVec2(previewSize, previewSize));
+                        ImGui::PopID();
+                        
+                        if (i < 3) ImGui::SameLine();
+                    }
+                }
+            }
+    
+            // Output pins
+            const char* pinLabels[4] = {"R Out", "G Out", "B Out", "A Out"};
+            for (int i = 0; i < 4; i++) {
+                ImNodes::BeginOutputAttribute(outputPins[i]);
+                ImGui::Text("%s", pinLabels[i]);
+                ImNodes::EndOutputAttribute();
+            }
+        }
+    };
+
 // Blur Node
 class BlurNode : public Node {
     private:
@@ -672,6 +863,9 @@ public:
         else if (type == "Output") {
             return std::make_shared<OutputNode>(id);
         }
+        else if (type == "ColorSplitter") {
+            return std::make_shared<ColorChannelSplitterNode>(id);
+        }        
         else if (type == "Blur") {
             return std::make_shared<BlurNode>(id);
         }
@@ -739,6 +933,10 @@ int main() {
                     auto node = editor.createNode("Output");
                     editor.addNode(node);
                 }
+                if (ImGui::MenuItem("Color Splitter")) {
+                    auto node = editor.createNode("ColorSplitter");
+                    editor.addNode(node);
+                }                
                 if (ImGui::MenuItem("Blur")) {
                     auto node = editor.createNode("Blur");
                     editor.addNode(node);
