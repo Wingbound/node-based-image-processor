@@ -60,3 +60,5 @@ This C++ application provides a node-based interface for image manipulation. Use
     ```bash
     ./node_based_image_processor
     ```
+5. **Documentation**
+   * The third-party libraries used are imgui and imnodes. They are used primarily because of the ease of using these repositories and because of my inability to properly use the QT repositories, which are popularly used for these kinds of applications.
