@@ -229,7 +229,7 @@ public:
             
             cv::Mat inputImage = inputNode->getOutputImage(outputPinIndex);
             if (!inputImage.empty()) {
-                inputImage.convertTo(processedImage, -1, contrast, brightness * 2.55f);
+                inputImage.convertTo(processedImage, -1, contrast, brightness);
                 markProcessed();
             }
         }
@@ -913,6 +913,191 @@ class ThresholdNode : public Node {
         }
     };
 
+// Edge Detection Node
+class EdgeDetectionNode : public Node {
+    private:
+        int algorithm = 0; // 0: Sobel, 1: Canny
+        int sobelKSize = 3;
+        int sobelDx = 1;
+        int sobelDy = 1;
+        int cannyThreshold1 = 50;
+        int cannyThreshold2 = 150;
+        int cannyApertureSize = 3;
+        bool overlay = false;
+        float overlayWeight = 0.7;
+        
+        GLuint previewTexture = 0;
+        cv::Mat edgeImage;
+        
+        void updatePreviewTexture() {
+            if (edgeImage.empty()) return;
+            
+            if (previewTexture) {
+                glDeleteTextures(1, &previewTexture);
+            }
+            
+            // Create OpenGL texture
+            glGenTextures(1, &previewTexture);
+            glBindTexture(GL_TEXTURE_2D, previewTexture);
+            
+            // Setup filtering parameters
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            
+            // Upload pixels into texture
+            cv::Mat rgbEdge;
+            cv::cvtColor(edgeImage, rgbEdge, cv::COLOR_GRAY2RGB);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rgbEdge.cols, rgbEdge.rows, 
+                        0, GL_RGB, GL_UNSIGNED_BYTE, rgbEdge.data);
+        }
+    
+    public:
+        EdgeDetectionNode(int id) : Node(id, "Edge Detection") {
+            addInputPin();
+            addOutputPin();
+        }
+        
+        ~EdgeDetectionNode() {
+            if (previewTexture) {
+                glDeleteTextures(1, &previewTexture);
+            }
+        }
+    
+        void process(const std::map<int, std::shared_ptr<Node>>& nodes, 
+                     const std::vector<Connection>& connections) override {
+            if (!getNeedsProcessing()) return;
+    
+            int outputPinIndex = 0;
+            auto inputNode = getConnectedInputNode(inputPins[0], nodes, connections, outputPinIndex);
+            
+            if (inputNode) {
+                // Make sure the input node is processed
+                if (inputNode->getNeedsProcessing()) {
+                    inputNode->process(nodes, connections);
+                }
+                
+                cv::Mat inputImage = inputNode->getOutputImage(outputPinIndex);
+                if (!inputImage.empty()) {
+                    // Convert to grayscale if necessary
+                    cv::Mat grayImage;
+                    if (inputImage.channels() > 1) {
+                        cv::cvtColor(inputImage, grayImage, cv::COLOR_BGR2GRAY);
+                    } else {
+                        grayImage = inputImage.clone();
+                    }
+                    
+                    // Apply edge detection based on selected algorithm
+                    if (algorithm == 0) {  // Sobel
+                        // Ensure ksize is odd
+                        int ksize = (sobelKSize % 2 == 0) ? sobelKSize + 1 : sobelKSize;
+                        
+                        // Apply Sobel in X and Y directions
+                        cv::Mat sobelX, sobelY, sobelCombined;
+                        cv::Sobel(grayImage, sobelX, CV_16S, sobelDx, 0, ksize);
+                        cv::Sobel(grayImage, sobelY, CV_16S, 0, sobelDy, ksize);
+                        
+                        // Convert back to CV_8U
+                        cv::Mat absX, absY;
+                        cv::convertScaleAbs(sobelX, absX);
+                        cv::convertScaleAbs(sobelY, absY);
+                        
+                        // Combine the results
+                        cv::addWeighted(absX, 0.5, absY, 0.5, 0, edgeImage);
+                    } else {  // Canny
+                        // Ensure aperture size is odd and between 3-7
+                        int apertureSize = std::max(3, std::min(7, (cannyApertureSize % 2 == 0) ? 
+                                                cannyApertureSize + 1 : cannyApertureSize));
+                                                
+                        cv::Canny(grayImage, edgeImage, cannyThreshold1, cannyThreshold2, apertureSize);
+                    }
+                    
+                    // Handle overlay option
+                    if (overlay && inputImage.channels() == 3) {
+                        // Create a 3-channel version of the edge image
+                        cv::Mat edgeColor;
+                        cv::cvtColor(edgeImage, edgeColor, cv::COLOR_GRAY2BGR);
+                        
+                        // Overlay using weighted addition
+                        cv::addWeighted(inputImage, 1.0 - overlayWeight, edgeColor, overlayWeight, 0, processedImage);
+                    } else if (overlay && inputImage.channels() == 1) {
+                        // For grayscale input, we can just blend directly
+                        cv::addWeighted(inputImage, 1.0 - overlayWeight, edgeImage, overlayWeight, 0, processedImage);
+                    } else {
+                        // No overlay, just use edge image
+                        processedImage = edgeImage.clone();
+                    }
+                    
+                    updatePreviewTexture();
+                    markProcessed();
+                }
+            }
+        }
+    
+        void drawNodeContent() override {
+            // Input pin
+            ImNodes::BeginInputAttribute(inputPins[0]);
+            ImGui::Text("Input");
+            ImNodes::EndInputAttribute();
+    
+            // Node controls
+            bool changed = false;
+            
+            // Algorithm selection
+            const char* algorithms[] = { "Sobel", "Canny" };
+            changed |= ImGui::Combo("Algorithm", &algorithm, algorithms, IM_ARRAYSIZE(algorithms));
+            
+            // Parameter controls based on selected algorithm
+            if (algorithm == 0) {  // Sobel
+                changed |= ImGui::SliderInt("Kernel Size", &sobelKSize, 1, 7, "%d");
+                ImGui::Text("(Must be odd, 1-7)");
+                
+                changed |= ImGui::SliderInt("X Derivative", &sobelDx, 0, 2);
+                changed |= ImGui::SliderInt("Y Derivative", &sobelDy, 0, 2);
+                ImGui::Text("(At least one derivative order must be > 0)");
+                
+                // Ensure at least one derivative is non-zero
+                if (sobelDx == 0 && sobelDy == 0) {
+                    sobelDx = 1;
+                    changed = true;
+                }
+            } else {  // Canny
+                changed |= ImGui::SliderInt("Lower Threshold", &cannyThreshold1, 0, 255);
+                changed |= ImGui::SliderInt("Upper Threshold", &cannyThreshold2, 0, 255);
+                changed |= ImGui::SliderInt("Aperture Size", &cannyApertureSize, 3, 7, "%d");
+                ImGui::Text("(Must be odd, 3-7)");
+                
+                // Ensure threshold2 >= threshold1
+                if (cannyThreshold2 < cannyThreshold1) {
+                    cannyThreshold2 = cannyThreshold1;
+                    changed = true;
+                }
+            }
+            
+            // Overlay option
+            changed |= ImGui::Checkbox("Overlay on Original", &overlay);
+            
+            if (overlay) {
+                changed |= ImGui::SliderFloat("Overlay Weight", &overlayWeight, 0.0f, 1.0f);
+            }
+            
+            if (changed) {
+                setNeedsProcessing();
+            }
+            
+            // Display edge preview
+            if (previewTexture) {
+                ImGui::Text("Edge Preview:");
+                ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<unsigned long long int>(previewTexture)), 
+                             ImVec2(150, 150));
+            }
+    
+            // Output pin
+            ImNodes::BeginOutputAttribute(outputPins[0]);
+            ImGui::Text("Output");
+            ImNodes::EndOutputAttribute();
+        }
+    };
+
 // Node Editor class to manage the canvas
 class NodeEditor {
 private:
@@ -1055,6 +1240,9 @@ public:
         else if (type == "Threshold") {
             return std::make_shared<ThresholdNode>(id);
         }
+        else if (type == "EdgeDetection") {
+            return std::make_shared<EdgeDetectionNode>(id);
+        }
         
         return nullptr;
     }
@@ -1103,9 +1291,9 @@ int main() {
 
         // Menu bar
         if (ImGui::BeginMenuBar()) {
-            if (ImGui::BeginMenu("File")) {
-                ImGui::EndMenu();
-            }
+            // if (ImGui::BeginMenu("File")) {
+            //     ImGui::EndMenu();
+            // }
             if (ImGui::BeginMenu("Add Node")) {
                 if (ImGui::MenuItem("Image Input")) {
                     auto node = editor.createNode("ImageInput");
@@ -1129,6 +1317,10 @@ int main() {
                 }
                 if (ImGui::MenuItem("Threshold")) {
                     auto node = editor.createNode("Threshold");
+                    editor.addNode(node);
+                }
+                if (ImGui::MenuItem("Edge Detection")) {
+                    auto node = editor.createNode("EdgeDetection");
                     editor.addNode(node);
                 }
                 ImGui::EndMenu();

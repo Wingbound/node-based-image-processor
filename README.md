@@ -28,9 +28,9 @@ This C++ application provides a node-based interface for image manipulation. Use
         * Color Channel Splitter: Splits RGB/RGBA images into separate channel outputs with an option to output grayscale representations.
     * **Intermediate Nodes:**
         * Blur Node: Implements Gaussian blur with configurable radius and uniform or directional blur options.
-        <!-- * Threshold Node: Converts images to binary images based on a threshold value, with options for different thresholding methods and a histogram display.
+        * Threshold Node: Converts images to binary images based on a threshold value, with options for different thresholding methods and a histogram display.
         * Edge Detection Node: Implements Sobel and Canny edge detection algorithms with configurable parameters and an option to overlay edges on the original image.
-        * Blend Node: Combines two images using different blend modes (normal, multiply, screen, overlay, difference) and includes an opacity/mix slider.
+        <!-- * Blend Node: Combines two images using different blend modes (normal, multiply, screen, overlay, difference) and includes an opacity/mix slider.
         -->
 * Graph-based execution system that:
     * Detects circular dependencies. 
