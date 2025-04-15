@@ -37,6 +37,28 @@ This C++ application provides a node-based interface for image manipulation. Use
     * Processes nodes in the correct order. 
     * Caches results to avoid redundant processing. 
 
+## Design Document
+### Architecture
+
+- **Frontend**: Built with ImGui and imnodes for GUI and interaction
+- **Backend**: C++ image processing using OpenCV
+- **Graph Execution**: Custom system that evaluates node graph topologically to apply transformations
+
+### Data Flow
+1. User loads an image via the "Image Input" node.
+2. Nodes are connected to form a graph.
+3. Execution engine evaluates from input to output.
+4. Output node displays final image result.
+
+### Key Design Decisions
+- **ImGui + imnodes** was used for ease of prototyping and flexibility in creating custom node editors.
+- A custom node system was preferred over pre-built engines to retain full control over processing logic.
+
+### Third-Party Libraries
+- **OpenCV**: For image manipulation (e.g., applying filters, transformations).
+- **ImGui**: For rendering GUI.
+- **imnodes**: For creating the visual node editor.
+
 ## Build Instructions
 
 1.  **Prerequisites:**
@@ -60,5 +82,3 @@ This C++ application provides a node-based interface for image manipulation. Use
     ```bash
     ./node_based_image_processor
     ```
-5. **Documentation**
-   * The third-party libraries used are imgui and imnodes. They are used primarily because of the ease of using these repositories and because of my inability to properly use the QT repositories, which are popularly used for these kinds of applications.
