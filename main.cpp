@@ -730,6 +730,189 @@ class BlurNode : public Node {
         }
     };
 
+// Threshold Node
+class ThresholdNode : public Node {
+    private:
+        int thresholdValue = 127;
+        int thresholdType = 0; // 0: Binary, 1: Binary Inverted, 2: Truncate, 3: ToZero, 4: ToZero Inverted
+        int adaptiveMethod = 0; // 0: None (global), 1: Mean, 2: Gaussian
+        int blockSize = 11;
+        int constant = 2;
+        bool useOtsu = false;
+        
+        // Histogram data
+        std::vector<int> histogram;
+        GLuint histogramTexture = 0;
+        
+        void updateHistogram(const cv::Mat& image) {
+            // Clear previous histogram
+            histogram.clear();
+            histogram.resize(256, 0);
+            
+            // Calculate histogram
+            if (image.empty() || image.channels() > 1) return;
+            
+            for (int y = 0; y < image.rows; y++) {
+                for (int x = 0; x < image.cols; x++) {
+                    uchar pixelValue = image.at<uchar>(y, x);
+                    histogram[pixelValue]++;
+                }
+            }
+            
+            // Create histogram visualization texture
+            if (histogramTexture) {
+                glDeleteTextures(1, &histogramTexture);
+            }
+            
+            // Find maximum count for normalization
+            int maxCount = *std::max_element(histogram.begin(), histogram.end());
+            if (maxCount == 0) return;
+            
+            // Create histogram image
+            cv::Mat histImage = cv::Mat::zeros(200, 256, CV_8UC3);
+            for (int i = 0; i < 256; i++) {
+                int height = cvRound(histogram[i] * 180.0 / maxCount);
+                cv::line(histImage, 
+                         cv::Point(i, histImage.rows), 
+                         cv::Point(i, histImage.rows - height), 
+                         cv::Scalar(200, 200, 200));
+                
+                // Mark the current threshold value
+                if (i == thresholdValue) {
+                    cv::line(histImage, 
+                             cv::Point(i, histImage.rows), 
+                             cv::Point(i, 0), 
+                             cv::Scalar(0, 0, 255));
+                }
+            }
+            
+            // Convert to texture
+            glGenTextures(1, &histogramTexture);
+            glBindTexture(GL_TEXTURE_2D, histogramTexture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            cv::Mat rgbHistImage;
+            cv::cvtColor(histImage, rgbHistImage, cv::COLOR_BGR2RGB);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rgbHistImage.cols, rgbHistImage.rows, 
+                        0, GL_RGB, GL_UNSIGNED_BYTE, rgbHistImage.data);
+        }
+    
+    public:
+        ThresholdNode(int id) : Node(id, "Threshold") {
+            addInputPin();
+            addOutputPin();
+        }
+        
+        ~ThresholdNode() {
+            if (histogramTexture) {
+                glDeleteTextures(1, &histogramTexture);
+            }
+        }
+    
+        void process(const std::map<int, std::shared_ptr<Node>>& nodes, 
+                     const std::vector<Connection>& connections) override {
+            if (!getNeedsProcessing()) return;
+    
+            int outputPinIndex = 0;
+            auto inputNode = getConnectedInputNode(inputPins[0], nodes, connections, outputPinIndex);
+            
+            if (inputNode) {
+                // Make sure the input node is processed
+                if (inputNode->getNeedsProcessing()) {
+                    inputNode->process(nodes, connections);
+                }
+                
+                cv::Mat inputImage = inputNode->getOutputImage(outputPinIndex);
+                if (!inputImage.empty()) {
+                    // Convert to grayscale if necessary
+                    cv::Mat grayImage;
+                    if (inputImage.channels() > 1) {
+                        cv::cvtColor(inputImage, grayImage, cv::COLOR_BGR2GRAY);
+                    } else {
+                        grayImage = inputImage.clone();
+                    }
+                    
+                    // Update histogram
+                    updateHistogram(grayImage);
+                    
+                    // Perform thresholding based on selected method
+                    if (adaptiveMethod == 0) { // Global thresholding
+                        int type = thresholdType;
+                        if (useOtsu) {
+                            type += cv::THRESH_OTSU;
+                        }
+                        cv::threshold(grayImage, processedImage, thresholdValue, 255, type);
+                    } else { // Adaptive thresholding
+                        int adaptiveType = (adaptiveMethod == 1) ? 
+                            cv::ADAPTIVE_THRESH_MEAN_C : cv::ADAPTIVE_THRESH_GAUSSIAN_C;
+                        
+                        // Make sure blockSize is odd
+                        int blockSizeOdd = (blockSize % 2 == 0) ? blockSize + 1 : blockSize;
+                        
+                        cv::adaptiveThreshold(grayImage, processedImage, 255, 
+                                             adaptiveType, thresholdType, 
+                                             blockSizeOdd, constant);
+                    }
+                    
+                    markProcessed();
+                }
+            }
+        }
+    
+        void drawNodeContent() override {
+            // Input pin
+            ImNodes::BeginInputAttribute(inputPins[0]);
+            ImGui::Text("Input");
+            ImNodes::EndInputAttribute();
+    
+            // Node controls
+            bool changed = false;
+            
+            // Threshold method selection
+            const char* thresholdMethods[] = { "Global", "Adaptive" };
+            changed |= ImGui::Combo("Method", &adaptiveMethod, thresholdMethods, IM_ARRAYSIZE(thresholdMethods));
+            
+            if (adaptiveMethod == 0) { // Global threshold
+                changed |= ImGui::SliderInt("Threshold", &thresholdValue, 0, 255);
+                
+                const char* thresholdTypes[] = { "Binary", "Binary Inv", "Truncate", "To Zero", "To Zero Inv" };
+                changed |= ImGui::Combo("Type", &thresholdType, thresholdTypes, IM_ARRAYSIZE(thresholdTypes));
+                
+                changed |= ImGui::Checkbox("Use Otsu", &useOtsu);
+                if (useOtsu) {
+                    ImGui::TextDisabled("(Threshold slider ignored when Otsu is enabled)");
+                }
+            } else { // Adaptive threshold
+                const char* adaptiveMethods[] = { "Mean", "Gaussian" };
+                changed |= ImGui::Combo("Adaptive Method", &adaptiveMethod, adaptiveMethods, IM_ARRAYSIZE(adaptiveMethods));
+                
+                const char* adaptiveTypes[] = { "Binary", "Binary Inv" };
+                changed |= ImGui::Combo("Type", &thresholdType, adaptiveTypes, 2);
+                
+                changed |= ImGui::SliderInt("Block Size", &blockSize, 3, 51, "%d");
+                ImGui::Text("(Block size must be odd)");
+                
+                changed |= ImGui::SliderInt("Constant", &constant, -10, 10);
+            }
+            
+            if (changed) {
+                setNeedsProcessing();
+            }
+            
+            // Display histogram
+            if (histogramTexture) {
+                ImGui::Text("Histogram:");
+                ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<unsigned long long int>(histogramTexture)), 
+                             ImVec2(256, 100));
+            }
+    
+            // Output pin
+            ImNodes::BeginOutputAttribute(outputPins[0]);
+            ImGui::Text("Output");
+            ImNodes::EndOutputAttribute();
+        }
+    };
+
 // Node Editor class to manage the canvas
 class NodeEditor {
 private:
@@ -869,6 +1052,9 @@ public:
         else if (type == "Blur") {
             return std::make_shared<BlurNode>(id);
         }
+        else if (type == "Threshold") {
+            return std::make_shared<ThresholdNode>(id);
+        }
         
         return nullptr;
     }
@@ -939,6 +1125,10 @@ int main() {
                 }                
                 if (ImGui::MenuItem("Blur")) {
                     auto node = editor.createNode("Blur");
+                    editor.addNode(node);
+                }
+                if (ImGui::MenuItem("Threshold")) {
+                    auto node = editor.createNode("Threshold");
                     editor.addNode(node);
                 }
                 ImGui::EndMenu();
